@@ -157,6 +157,9 @@ python3 -c "
 import json, time
 raw = '''$raw'''
 d = json.loads(raw)
+if 'type' in d and d.get('type') == 'error':
+    # Don't cache auth errors — retry next interval
+    import sys; sys.exit(1)
 fh = d.get('five_hour') or {}
 sd = d.get('seven_day') or {}
 result = {

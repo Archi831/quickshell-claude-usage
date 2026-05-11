@@ -19,7 +19,7 @@ Refreshes every 3 minutes. Click opens claude.ai.
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/quickshell-claude-usage
+git clone https://github.com/Archi831/quickshell-claude-usage
 cd quickshell-claude-usage
 python3 install.py
 ```

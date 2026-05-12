@@ -151,14 +151,13 @@ print(json.dumps({
 fi
 
 # Fetch fresh data
-raw=$(fetch_usage 2>/dev/null) || { echo '{"fiveHour":0,"sevenDay":0,"resetsAt":""}'; exit 0; }
+raw=$(fetch_usage 2>/dev/null) || exit 1
 
 python3 -c "
 import json, time
 raw = '''$raw'''
 d = json.loads(raw)
 if 'type' in d and d.get('type') == 'error':
-    # Don't cache auth errors — retry next interval
     import sys; sys.exit(1)
 fh = d.get('five_hour') or {}
 sd = d.get('seven_day') or {}
@@ -171,4 +170,4 @@ result = {
 with open('$CACHE_FILE', 'w') as f:
     json.dump({'ts': time.time(), 'data': d}, f)
 print(json.dumps(result))
-" 2>/dev/null || echo '{"fiveHour":0,"sevenDay":0,"fiveHourResetsAt":"","sevenDayResetsAt":""}'
+" 2>/dev/null || exit 1

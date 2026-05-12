@@ -5,6 +5,7 @@ CACHE_FILE="/tmp/waybar_claude_cache.json"
 CACHE_TTL=180
 COOKIE_DB="$HOME/.config/chromium/Default/Cookies"
 COOKIE_TMP="/tmp/qs_claude_cookies.sqlite"
+LOCK_FILE="/tmp/qs_claude_fetch.lock"
 
 get_aes_key() {
     local secret
@@ -15,37 +16,6 @@ secret = sys.argv[1].encode()
 key = hashlib.pbkdf2_hmac('sha1', secret, b'saltysalt', 1, 16)
 print(binascii.hexlify(key).decode())
 " "$secret"
-}
-
-decrypt_cookie() {
-    local enc_hex="$1" key_hex="$2"
-    python3 -c "
-import sqlite3, subprocess, sys, binascii
-
-key_hex = sys.argv[1]
-db = sys.argv[2]
-
-conn = sqlite3.connect(db)
-row = conn.execute(\"SELECT encrypted_value FROM cookies WHERE host_key LIKE '%claude.ai%' AND name=?\" , (sys.argv[3],)).fetchone()
-conn.close()
-if not row: sys.exit(1)
-
-enc = bytes(row[0])[3:]
-with open('/tmp/qs_claude_enc.bin', 'wb') as f:
-    f.write(enc)
-" "$key_hex" "$2" "$3" 2>/dev/null
-
-    openssl enc -aes-128-cbc -d -nopad \
-        -K "$key_hex" -iv "20202020202020202020202020202020" \
-        -in /tmp/qs_claude_enc.bin 2>/dev/null | \
-        python3 -c "
-import sys
-raw = sys.stdin.buffer.read()
-content = raw[32:]
-pad = content[-1]
-if 1 <= pad <= 16: content = content[:-pad]
-print(content.decode('utf-8', errors='replace').strip())
-"
 }
 
 fetch_usage() {
@@ -82,7 +52,6 @@ for name, enc in rows.items():
     org=$(echo "$session_key" | grep '^lastActiveOrg=' | cut -d= -f2-)
     [ -z "$sk" ] || [ -z "$org" ] && return 1
 
-    # Build full cookie header
     local cookie_hdr
     cookie_hdr=$(python3 -c "
 import sqlite3, subprocess, hashlib, binascii, sys
@@ -116,26 +85,8 @@ print('; '.join(parts))
         -H "Referer: https://claude.ai/"
 }
 
-format_reset() {
+read_cache() {
     python3 -c "
-import sys
-from datetime import datetime
-iso = sys.argv[1]
-if not iso or iso == 'null': print('?'); exit()
-dt = datetime.fromisoformat(iso).astimezone()
-now = datetime.now().astimezone()
-mins = int((dt - now).total_seconds() / 60)
-if mins < 0: print('soon'); exit()
-if mins < 60: print(f'{mins}m')
-else: print(f'{mins//60}h{mins%60:02d}m')
-" "$1" 2>/dev/null || echo "?"
-}
-
-# Check cache
-if [ -f "$CACHE_FILE" ]; then
-    age=$(python3 -c "import time,json; d=json.load(open('$CACHE_FILE')); print(int(time.time()-d.get('ts',0)))" 2>/dev/null || echo 9999)
-    if [ "$age" -lt "$CACHE_TTL" ]; then
-        python3 -c "
 import json
 d = json.load(open('$CACHE_FILE'))['data']
 fh = d.get('five_hour') or {}
@@ -146,11 +97,32 @@ print(json.dumps({
     'fiveHourResetsAt': fh.get('resets_at', ''),
     'sevenDayResetsAt': sd.get('resets_at', '')
 }))
-" 2>/dev/null && exit 0
+" 2>/dev/null
+}
+
+cache_age() {
+    python3 -c "import time,json; d=json.load(open('$CACHE_FILE')); print(int(time.time()-d.get('ts',0)))" 2>/dev/null || echo 9999
+}
+
+# Fast path: serve from cache without a lock
+if [ -f "$CACHE_FILE" ]; then
+    if [ "$(cache_age)" -lt "$CACHE_TTL" ]; then
+        read_cache && exit 0
     fi
 fi
 
-# Fetch fresh data
+# Cache is stale; acquire lock so only one instance fetches at a time
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    # Another instance is already fetching — wait for it to finish, then read its result
+    flock 200
+    if [ -f "$CACHE_FILE" ] && [ "$(cache_age)" -lt "$CACHE_TTL" ]; then
+        read_cache && exit 0
+    fi
+    exit 1
+fi
+
+# Got the lock; fetch fresh data
 raw=$(fetch_usage 2>/dev/null) || exit 1
 
 python3 -c "
